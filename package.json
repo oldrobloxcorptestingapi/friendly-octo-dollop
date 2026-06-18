@@ -5,6 +5,5 @@
   "description": "Traz AI Assistant — server-side proxy for AI services that need a hidden key (Tavily search now, more later).",
   "scripts": {
     "dev": "vercel dev"
-    "main": "api/main.js"
   }
 }
