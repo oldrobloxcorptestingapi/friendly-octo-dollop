@@ -87,8 +87,57 @@ async function handleExtract({ url }, res) {
   return res.status(200).json(await r.json());
 }
 
+// ── Provider-specific message normalisation ────────────────────────────
+/**
+ * Sanitise the messages array before forwarding to each provider.
+ *
+ * Google AI Studio — Gemini thinking models embed content blocks like
+ *   { type: 'thinking', thinking: '...', signature: '...' } inside
+ *   assistant content arrays.  The `signature` (thought_signature) MUST be
+ *   echoed back verbatim on subsequent turns, otherwise the API returns a 400.
+ *   → Preserve assistant content arrays intact for Google.
+ *
+ * All other providers — Unrecognised content block types cause 400 errors.
+ *   → Strip thinking blocks; collapse remaining text blocks to a plain string.
+ *
+ * Tool-result messages (role: 'tool') — Several providers require a plain
+ *   string for `content`, not an array.  Always flatten regardless of provider.
+ */
+function normalizeMessages(messages, providerName) {
+  const isGoogle = providerName === 'Google AI Studio';
+
+  return messages.map(raw => {
+    const msg = { ...raw };
+
+    // Tool-result messages — flatten content array to string for all providers
+    if (msg.role === 'tool' && Array.isArray(msg.content)) {
+      msg.content = msg.content
+        .filter(c => c.type === 'text')
+        .map(c => c.text)
+        .join('\n');
+      return msg;
+    }
+
+    // Assistant messages with a content array
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      if (isGoogle) {
+        // Keep thinking blocks + their signatures intact — required for multi-turn tool use
+        return msg;
+      }
+      // Non-Google: strip thinking blocks; collapse remaining text to a string
+      const text = msg.content
+        .filter(c => c.type !== 'thinking')
+        .map(c => (c.type === 'text' ? c.text : ''))
+        .join('');
+      msg.content = text || null;
+    }
+
+    return msg;
+  });
+}
+
 // ── SHARED: OpenAI-compatible streaming chat ────────────────────────────
-// All four new providers (Groq, GitHub Models, Google AI Studio, Cerebras)
+// All four providers (Groq, GitHub Models, Google AI Studio, Cerebras)
 // speak the OpenAI chat-completions wire format, so they share this handler.
 //
 // providerConfig:
@@ -98,10 +147,14 @@ async function handleExtract({ url }, res) {
 //   providerName — Human-readable label used in error messages.
 //
 // Accepted params (same shape as nvidia_chat for consistency):
-//   model, messages, tools, tool_choice, stream, max_tokens, temperature
+//   model, messages, tools, tool_choice, stream, max_tokens, temperature,
+//   thinking  ← forwarded only for Google AI Studio (Gemini thinking models).
+//              NVIDIA's `thinking` extension uses the same field name but a
+//              different schema and is handled in handleNvidiaChat instead.
 //
-// Note: the `thinking` param is intentionally NOT forwarded here — it is
-// NVIDIA-NIM-specific and will cause a 400 on every other provider.
+// Messages are normalised per-provider via normalizeMessages() to handle:
+//   • thought_signature round-tripping (Google) vs. thinking-block stripping
+//   • tool-result content flattened to string (required by most providers)
 async function handleOpenAICompatibleChat(params, res, { url, apiKey, providerName }) {
   if (!apiKey) {
     return res.status(503).json({ error: `${providerName} API key not configured (check Vercel env vars)` });
@@ -115,6 +168,7 @@ async function handleOpenAICompatibleChat(params, res, { url, apiKey, providerNa
     stream      = true,
     max_tokens  = 4096,
     temperature = 0.7,
+    thinking,                           // forwarded for Google AI Studio only
   } = params;
 
   if (!model) {
@@ -124,9 +178,16 @@ async function handleOpenAICompatibleChat(params, res, { url, apiKey, providerNa
     return res.status(400).json({ error: 'Missing or empty "messages" array' });
   }
 
-  const body = { model, messages, stream, max_tokens, temperature };
-  if (tools && tools.length) body.tools       = tools;
-  if (tool_choice)           body.tool_choice = tool_choice;
+  const body = {
+    model,
+    messages: normalizeMessages(messages, providerName),
+    stream,
+    max_tokens,
+    temperature,
+  };
+  if (tools && tools.length)                           body.tools       = tools;
+  if (tool_choice)                                     body.tool_choice = tool_choice;
+  if (thinking && providerName === 'Google AI Studio') body.thinking    = thinking;
 
   const r = await fetch(url, {
     method: 'POST',
@@ -213,8 +274,14 @@ async function handleGithubChat(params, res) {
 // ── GOOGLE AI STUDIO chat completions ──────────────────────────────────
 // https://ai.google.dev/gemini-api/docs/openai
 // Env var: GOOGLE_AI_KEY  (API key from https://aistudio.google.com/apikey)
-// Uses Google's OpenAI-compatible shim so the same wire format works for
-// all Gemini models (gemini-2.5-pro, gemini-2.5-flash, etc.).
+//
+// Uses Google's OpenAI-compatible shim for all Gemini models.
+//
+// Thinking models (gemini-2.5-pro, gemini-2.5-flash):
+//   Pass `thinking: { type: 'enabled', budget_tokens: N }` to enable thinking.
+//   The model embeds { type: 'thinking', thinking: '...', signature: '...' }
+//   blocks in assistant content.  normalizeMessages() preserves these so the
+//   thought_signature is correctly round-tripped in multi-turn tool calls.
 async function handleGoogleChat(params, res) {
   return handleOpenAICompatibleChat(params, res, {
     url:          'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
