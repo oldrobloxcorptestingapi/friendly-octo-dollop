@@ -5,5 +5,11 @@
       "src": "api/main.js",
       "use": "@vercel/node"
     }
+  ],
+  "routes": [
+    {
+      "src": "/api/main",
+      "dest": "/api/main.js"
+    }
   ]
 }
