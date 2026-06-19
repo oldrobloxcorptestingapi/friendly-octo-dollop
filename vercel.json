@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/main.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/main.js",
+      "dest": "/api/main",
+      "methods": ["POST", "OPTIONS"]
+    }
+  ]
+}
