@@ -6,11 +6,7 @@
       "use": "@vercel/node"
     }
   ],
-  "routes": [
-    {
-      "src": "/api/main.js",
-      "dest": "/api/main",
-      "methods": ["POST", "OPTIONS"]
-    }
-  ]
+  "functions": {
+    "api/main.js": {}
+  }
 }
